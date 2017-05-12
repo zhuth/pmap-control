@@ -20,13 +20,24 @@ byte temperature = 0;
 byte humidity = 0;
 
 void setup() {
-  delay(100);
   lcd.init();
   lcd.backlight();
-
-  lcd.setCursor(0, 0); lcd.print("AQI  :     CH2O:");
-  lcd.setCursor(0, 1); lcd.print("PM2.5:     PM10:");
-  lcd.setCursor(0, 2); lcd.print("Temp.:     Hum.:");
+  delay(100);
+  uint8_t degree[8] = {0x8,0xf4,0x8,0x43,0x4,0x4,0x43,0x0}; // Custom char degres c
+  byte p5[] = {
+  B11111,
+  B10000,
+  B11110,
+  B00001,
+  B00001,
+  B10001,
+  B01110,
+  B10000
+  };
+  lcd.createChar(1, degree);
+  lcd.createChar(2, p5);
+  lcd.setCursor(0, 0); lcd.print("AQI");
+  lcd.setCursor(0, 1); lcd.print("PM2\2 PM10 Tem Hum");
   
   Serial1.begin(9600);
   if (Serial) Serial.begin(9600);
@@ -34,6 +45,26 @@ void setup() {
 
   mySwitch.enableTransmit(9);
   mySwitch.send(126, 7);
+
+  Time t = rtc.time();
+  if (t.sec >= 60 || t.min >= 60 || t.hr >= 24) {
+    rtc.writeProtect(false);
+    rtc.halt(false);
+    // Make a new time object to set the date and time.
+    // Sunday, September 22, 2013 at 01:38:50.
+    t.min += t.sec;
+    t.sec %= 60;
+    if (t.min >= 60) {
+      t.hr++;
+      t.min %= 60;
+    }
+    if (t.hr >= 24) {
+      t.hr = 0;
+    }
+    Time t1(t.yr, t.mon, t.date, t.hr, t.min, t.sec, Time::kSunday);
+    // Set the time and date on the chip.
+    rtc.time(t1);
+  }
 }
 
 inline int aqi_pm25(int pm25) {
@@ -72,10 +103,11 @@ int atoilen(char* buf, int offset, int len) {
 }
 
 char buf1[30], buf2[10], stg[20];
-char i1 = 0, i2 = 0, ic = 0, c;
-int pm1, pm25, pm10, p_aqi, ch2o, ch2o_m = 0;
+char i1 = 0, i2 = 0, ic = 0, c, state = 0;
+int pm1, pm25, pm10, p_aqi, p_aqi_last = 0, ch2o, ch2o_m = 0;
 int mil;
 int a25, a10;
+bool enableSend = true;
 
 void loop() {
   if (Serial1.available()) {
@@ -100,14 +132,11 @@ void loop() {
       p_aqi = aqi(pm25, pm10);
       a25 = 0; a10 = 0; ic = 0;
       
-      lcd.setCursor(6, 0);
+      lcd.setCursor(5, 0);
       sprintf(stg, "%4d", p_aqi); 
       lcd.print(stg);
-      lcd.setCursor(6, 1);
-      sprintf(stg, "%4d", pm25);
-      lcd.print(stg);
-      lcd.setCursor(16, 1);
-      sprintf(stg, "%4d", pm10);
+      lcd.setCursor(0, 2);
+      sprintf(stg, "%4d %4d", pm25, pm10);
       lcd.print(stg);
     }
 
@@ -133,8 +162,8 @@ void loop() {
     
     ch2o = (buf2[4] << 8) | buf2[5];
     ch2o_m = (ch2o_m > ch2o) ? ch2o_m : ch2o;
-    lcd.setCursor(16, 0);
-    sprintf(stg, "%4d", ch2o, ch2o_m);
+    lcd.setCursor(11, 0);
+    sprintf(stg, "CH2O:%4d", ch2o, ch2o_m);
     lcd.print(stg);
   }
   
@@ -145,50 +174,29 @@ void loop() {
     
     Time t = rtc.time();
     lcd.setCursor(0, 3);
-    sprintf(stg, "%04d-%02d-%02d %02d:%02d:%02d", t.yr, t.mon, t.date, t.hr, t.min, t.sec);
-
-    if (t.sec >= 60) {
-      rtc.writeProtect(false);
-      rtc.halt(false);
-      // Make a new time object to set the date and time.
-      // Sunday, September 22, 2013 at 01:38:50.
-      t.min += t.sec;
-      t.sec %= 60;
-      if (t.min >= 60) {
-        t.hr++;
-        t.min %= 60;
-      }
-      if (t.hr >= 24) {
-        t.hr = 0;
-      }
-      Time t1(t.yr, t.mon, t.date, t.hr, t.min, t.sec, Time::kSunday);
-      // Set the time and date on the chip.
-      rtc.time(t1);
-    }
-    
+    sprintf(stg, "%04d-%02d-%02d %02d:%02d:%02d", t.yr, t.mon, t.date, t.hr, t.min, t.sec);    
     lcd.print(stg);
     
     if (0 == dht11.read(DHT11_PIN, &temperature, &humidity, NULL)) {
-      lcd.setCursor(6, 2);
-      sprintf(stg, "%4d", temperature);
-      lcd.print(stg);
-      lcd.setCursor(16, 2);
-      sprintf(stg, "%4d", humidity);
+      lcd.setCursor(10, 2);
+      sprintf(stg, "%2d\1 %2d%%", temperature, humidity);
       lcd.print(stg);
     } else {
       //Serial.print("DHT Err.\t");
     }
 
     if ((mil / 1000) % 5 == 0) {
-      if (p_aqi <= 50) {
-        mySwitch.send(1, 7);
-//      } else if (p_aqi <= 100) {
-//        mySwitch.send(1, 7);
-      } else if (p_aqi <= 100) {
-        mySwitch.send(3, 7);
-      } else {
-        mySwitch.send(127, 7);
-      }
+      if (p_aqi <= 25)
+        state = 0;
+      else if ((p_aqi <= 75 && state > 2) || (p_aqi >= 50 && state < 2))
+        state = 2;
+      else if (p_aqi >= 120)
+        state = 126;
+      else if (p_aqi >= 100 && state < 3)
+        state = 3;
+      if (enableSend)
+        mySwitch.send(state + 1, 7);
+      p_aqi_last = p_aqi;
     }
   
 //    Serial.print(pm1, DEC); Serial.print(" ");
@@ -208,6 +216,8 @@ void loop() {
     case ':':
       lcd.backlight();
       break;
+    case '-':
+      enableSend = !enableSend;
     case '0':
     case '1':
     case '2':
